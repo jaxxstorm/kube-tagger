@@ -271,7 +271,7 @@ func setTag(ctx context.Context, svc *ec2.EC2, tagKey string, tagValue string, v
 	if *debug {
 		logWithCtx(ctx).Debugf("Returned value from CreatesTags call: %v", ret)
 	}
-	tagsExisting.Inc()
+	tagsAdded.Inc()
 	return true
 }
 
