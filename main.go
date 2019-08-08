@@ -47,6 +47,7 @@ var (
 	debug             = kingpin.Flag("debug", "Enable debug logging").Bool()
 	local             = kingpin.Flag("local", "Run locally for development").Bool()
 	kubeconfig        = kingpin.Flag("kubeconfig", "Path to kubeconfig").OverrideDefaultFromEnvar("KUBECONFIG").String()
+	dryrun            = kingpin.Flag("dry-run", "Don't actually tag the volumes").Bool()
 	ns                = ctxKey("namespace")
 	pvcname           = ctxKey("volumeClaimName")
 	volname           = ctxKey("volumeName")
@@ -139,7 +140,12 @@ func main() {
 					}
 				}
 				if tagsToAdd != "" {
-					addAWSTags(ctx, tagsToAdd, awsVolumeID, separator)
+					if !*dryrun {
+						addAWSTags(ctx, tagsToAdd, awsVolumeID, separator)
+					} else {
+						logWithCtx(ctx).WithFields(log.Fields{"tags": tagsToAdd, "volId": awsVolumeID}).Info("Running in dry run mode, not adding tags")
+					}
+
 				}
 			} else {
 				logWithCtx(ctx).Warn("Volume is not EBS. Ignoring")
