@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"regexp"
 	"strings"
 
@@ -59,7 +58,9 @@ func init() {
 }
 
 func logWithCtx(ctx context.Context) *log.Entry {
-	entry := log.WithField("app", "kube-tagger")
+
+	entry := log.WithContext(ctx)
+
 	if ns := ctx.Value(ns); ns != nil {
 		entry = entry.WithField("namespace", ns)
 	}
@@ -242,7 +243,7 @@ func setTag(ctx context.Context, svc *ec2.EC2, tagKey string, tagValue string, v
 func hasTag(ctx context.Context, tags []*ec2.Tag, key string, value string) bool {
 	for i := range tags {
 		if *tags[i].Key == key && *tags[i].Value == value {
-			logWithCtx(ctx).WithFields(log.Fields{"key": key, "value": value}).Info("Tag value already exists")
+			logWithCtx(ctx).WithFields(log.Fields{"tagKey": key, "tagValue": value}).Info("Tag value already exists")
 			return true
 		}
 	}
@@ -261,20 +262,4 @@ func splitVol(vol string) (string, string) {
 	zone := re.ReplaceAllString(sp[2], "")
 
 	return zone, sp[3]
-}
-
-func stringInSlice(str string, list []string) bool {
-	for _, v := range list {
-		if v == str {
-			return true
-		}
-	}
-	return false
-}
-
-func homeDir() string {
-	if h := os.Getenv("HOME"); h != "" {
-		return h
-	}
-	return os.Getenv("USERPROFILE") // windows
 }
