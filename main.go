@@ -57,11 +57,8 @@ func init() {
 	kingpin.Parse()
 }
 
-func logger(ctx context.Context, err error) *log.Entry {
+func logWithCtx(ctx context.Context) *log.Entry {
 	entry := log.WithField("app", "kube-tagger")
-	if err != nil {
-		entry = entry.WithError(err)
-	}
 	if ns := ctx.Value(ns); ns != nil {
 		entry = entry.WithField("namespace", ns)
 	}
@@ -96,12 +93,12 @@ func main() {
 	// create the clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		logger(ctx, err).Fatal("Error creating clientset")
+		logWithCtx(ctx).WithError(err).Fatal("Error creating clientset")
 	}
 
 	watcher, err := clientset.CoreV1().PersistentVolumeClaims("").Watch(metav1.ListOptions{})
 	if err != nil {
-		logger(ctx, err).Fatal("Error creating PVC watcher")
+		logWithCtx(ctx).WithError(err).Fatal("Error creating PVC watcher")
 	}
 	/* changes */
 	ch := watcher.ResultChan()
@@ -109,7 +106,7 @@ func main() {
 	for event := range ch {
 		pvc, ok := event.Object.(*v1.PersistentVolumeClaim)
 		if !ok {
-			logger(ctx, nil).Fatal("Unexpected event type")
+			logWithCtx(ctx).Fatal("Unexpected event type")
 		}
 		if event.Type == watch.Added || event.Type == watch.Modified {
 			namespace := pvc.GetNamespace()
@@ -123,11 +120,11 @@ func main() {
 
 			awsVolume, errp := clientset.CoreV1().PersistentVolumes().Get(volumeName, metav1.GetOptions{})
 			if errp != nil {
-				logger(ctx, errp).Error("Cannot find EBS volume associated with Volume Claim")
+				logWithCtx(ctx).WithError(errp).Error("Cannot find EBS volume associated with Volume Claim")
 				continue
 			}
 			awsVolumeID := awsVolume.Spec.PersistentVolumeSource.AWSElasticBlockStore.VolumeID
-			logger(ctx, nil).Info("Processing Volume Tags")
+			logWithCtx(ctx).Info("Processing Volume Tags")
 			//eventLogger.WithFields(log.Fields{"awsVolumeID": awsVolumeID, "eventType": event.Type}).Info("Processing Volume Tags")
 			if isEBSVolume(&volumeClaim) {
 				separator := ","
@@ -142,10 +139,10 @@ func main() {
 					}
 				}
 				if tagsToAdd != "" {
-					addAWSTags(tagsToAdd, awsVolumeID, separator)
+					addAWSTags(ctx, tagsToAdd, awsVolumeID, separator)
 				}
 			} else {
-				logger(ctx, nil).Warn("Volume is not EBS. Ignoring")
+				logWithCtx(ctx).Warn("Volume is not EBS. Ignoring")
 			}
 		}
 	}
@@ -167,7 +164,7 @@ func isEBSVolume(volume *v1.PersistentVolumeClaim) bool {
 	Loops through the tags found for the volume and calls `setTag`
 	to add it via the AWS api
 */
-func addAWSTags(awsTags string, awsVolumeID string, separator string) {
+func addAWSTags(ctx context.Context, awsTags string, awsVolumeID string, separator string) {
 
 	awsRegion, awsVolume := splitVol(awsVolumeID)
 
@@ -187,26 +184,20 @@ func addAWSTags(awsTags string, awsVolumeID string, separator string) {
 
 	tags := strings.Split(awsTags, separator)
 
-	tagLogger := log.WithFields(log.Fields{
-		"volume": awsVolume,
-		"region": awsRegion,
-		"tags":   tags,
-	})
-
 	resp, err := svc.DescribeVolumes(params)
 	if err != nil {
-		tagLogger.WithError(err).Error("Cannot get volume")
+		logWithCtx(ctx).WithError(err).WithFields(log.Fields{"volId": awsVolume, "region": awsRegion}).Error("Cannot get volume")
 		return
 	}
 	for i := range tags {
-		tagLogger.Info("Adding tag to EBS Volume")
 		t := strings.Split(tags[i], "=")
 		if len(t) != 2 {
-			tagLogger.WithFields(log.Fields{"tag": t}).Error("Skipping Malformed Tag")
+			logWithCtx(ctx).Error("Skipping malform tag")
 			continue
 		}
-		if !hasTag(resp.Volumes[0].Tags, t[0], t[1]) {
-			setTag(svc, t[0], t[1], awsVolume)
+		logWithCtx(ctx).WithFields(log.Fields{"tagKey": t[0], "tagValue": t[1]}).Info("Adding tags to EBS volume")
+		if !hasTag(ctx, resp.Volumes[0].Tags, t[0], t[1]) {
+			setTag(ctx, svc, t[0], t[1], awsVolume)
 		}
 	}
 }
@@ -214,7 +205,7 @@ func addAWSTags(awsTags string, awsVolumeID string, separator string) {
 /*
 	AWS api call to set the tag found in the annotations
 */
-func setTag(svc *ec2.EC2, tagKey string, tagValue string, volumeID string) bool {
+func setTag(ctx context.Context, svc *ec2.EC2, tagKey string, tagValue string, volumeID string) bool {
 	tags := &ec2.CreateTagsInput{
 		Resources: []*string{
 			aws.String(volumeID),
@@ -228,11 +219,11 @@ func setTag(svc *ec2.EC2, tagKey string, tagValue string, volumeID string) bool 
 	}
 	ret, err := svc.CreateTags(tags)
 	if err != nil {
-		log.WithError(err).Fatal("Error creating tags")
+		logWithCtx(ctx).WithError(err).Fatal("Error creating tags")
 		return false
 	}
 	if *debug {
-		log.Debugf("Returned value from CreateTags call: %v", ret)
+		logWithCtx(ctx).Debugf("Returned value from CreatesTags call: %v", ret)
 	}
 	return true
 }
@@ -242,10 +233,10 @@ func setTag(svc *ec2.EC2, tagKey string, tagValue string, volumeID string) bool 
    but if you're using cloudtrail it may be an issue seeing it
    being set all muiltiple times
 */
-func hasTag(tags []*ec2.Tag, key string, value string) bool {
+func hasTag(ctx context.Context, tags []*ec2.Tag, key string, value string) bool {
 	for i := range tags {
 		if *tags[i].Key == key && *tags[i].Value == value {
-			log.WithFields(log.Fields{"key": key, "value": value}).Info("Tag value already exists")
+			logWithCtx(ctx).WithFields(log.Fields{"key": key, "value": value}).Info("Tag value already exists")
 			return true
 		}
 	}
