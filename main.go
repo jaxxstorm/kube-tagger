@@ -237,8 +237,8 @@ func addAWSTags(ctx context.Context, awsTags string, awsVolumeID string, separat
 			processingErrors.Inc()
 			continue
 		}
-		logWithCtx(ctx).WithFields(log.Fields{"tagKey": t[0], "tagValue": t[1]}).Info("Adding tags to EBS volume")
-		if !hasTag(ctx, resp.Volumes[0].Tags, t[0], t[1]) {
+		logWithCtx(ctx).WithFields(log.Fields{"tagKey": t[0], "tagValue": t[1], "volId": awsVolume, "region": awsRegion}).Info("Processing EBS Volume")
+		if !hasTag(ctx, resp.Volumes[0].Tags, t[0], t[1], awsVolume, awsRegion) {
 			tagAdded = true
 			setTag(ctx, svc, t[0], t[1], awsVolume)
 		}
@@ -265,7 +265,7 @@ func setTag(ctx context.Context, svc *ec2.EC2, tagKey string, tagValue string, v
 	}
 	ret, err := svc.CreateTags(tags)
 	if err != nil {
-		logWithCtx(ctx).WithError(err).Fatal("Error creating tags")
+		logWithCtx(ctx).WithError(err).WithFields(log.Fields{"volId": volumeID}).Fatal("Error creating tags")
 		return false
 	}
 	if *debug {
@@ -280,10 +280,10 @@ func setTag(ctx context.Context, svc *ec2.EC2, tagKey string, tagValue string, v
    but if you're using cloudtrail it may be an issue seeing it
    being set all muiltiple times
 */
-func hasTag(ctx context.Context, tags []*ec2.Tag, key string, value string) bool {
+func hasTag(ctx context.Context, tags []*ec2.Tag, key string, value string, awsVolume string, awsRegion string) bool {
 	for i := range tags {
 		if *tags[i].Key == key && *tags[i].Value == value {
-			logWithCtx(ctx).WithFields(log.Fields{"tagKey": key, "tagValue": value}).Info("Tag value already exists")
+			logWithCtx(ctx).WithFields(log.Fields{"tagKey": key, "tagValue": value, "volId": awsVolume, "region": awsRegion}).Info("Tag value already exists")
 			tagsExisting.Inc()
 			return true
 		}
