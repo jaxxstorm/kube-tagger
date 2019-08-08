@@ -37,19 +37,45 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
+
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type ctxKey string
 
 var (
-	version    string = "snapshot"
-	debug             = kingpin.Flag("debug", "Enable debug logging").Bool()
-	local             = kingpin.Flag("local", "Run locally for development").Bool()
-	kubeconfig        = kingpin.Flag("kubeconfig", "Path to kubeconfig").OverrideDefaultFromEnvar("KUBECONFIG").String()
-	dryrun            = kingpin.Flag("dry-run", "Don't actually tag the volumes").Bool()
-	ns                = ctxKey("namespace")
-	pvcname           = ctxKey("volumeClaimName")
-	volname           = ctxKey("volumeName")
+	version         = "snapshot"
+	debug           = kingpin.Flag("debug", "Enable debug logging").Bool()
+	local           = kingpin.Flag("local", "Run locally for development").Bool()
+	kubeconfig      = kingpin.Flag("kubeconfig", "Path to kubeconfig").OverrideDefaultFromEnvar("KUBECONFIG").String()
+	dryrun          = kingpin.Flag("dry-run", "Don't actually tag the volumes").Bool()
+	ns              = ctxKey("namespace")
+	pvcname         = ctxKey("volumeClaimName")
+	volname         = ctxKey("volumeName")
+	eventsProcessed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubetagger_processed_events_total",
+		Help: "The total number of processed events",
+	})
+	tagsAdded = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubetagger_volume_tags_added",
+		Help: "Number of tags added to volumes the kubetagger",
+	})
+	tagsExisting = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubetagger_volume_tags_existing",
+		Help: "Number of tags already existing on volumes",
+	})
+	volumesTagged = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubetagger_volumes_tagged",
+		Help: "Number of volumes tagged by kubetagger",
+	})
+	processingErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubetagger_errors",
+		Help: "Number of errors while processing",
+	})
 )
 
 func init() {
@@ -74,6 +100,11 @@ func logWithCtx(ctx context.Context) *log.Entry {
 }
 
 func main() {
+
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		http.ListenAndServe(":2112", nil)
+	}()
 
 	ctx := context.Background()
 
@@ -106,6 +137,7 @@ func main() {
 	ch := watcher.ResultChan()
 
 	for event := range ch {
+		eventsProcessed.Inc()
 		pvc, ok := event.Object.(*v1.PersistentVolumeClaim)
 		if !ok {
 			logWithCtx(ctx).Fatal("Unexpected event type")
@@ -123,11 +155,11 @@ func main() {
 			awsVolume, errp := clientset.CoreV1().PersistentVolumes().Get(volumeName, metav1.GetOptions{})
 			if errp != nil {
 				logWithCtx(ctx).WithError(errp).Error("Cannot find EBS volume associated with Volume Claim")
+				processingErrors.Inc()
 				continue
 			}
 			awsVolumeID := awsVolume.Spec.PersistentVolumeSource.AWSElasticBlockStore.VolumeID
 			logWithCtx(ctx).Info("Processing Volume Tags")
-			//eventLogger.WithFields(log.Fields{"awsVolumeID": awsVolumeID, "eventType": event.Type}).Info("Processing Volume Tags")
 			if isEBSVolume(&volumeClaim) {
 				separator := ","
 				tagsToAdd := ""
@@ -173,6 +205,7 @@ func isEBSVolume(volume *v1.PersistentVolumeClaim) bool {
 */
 func addAWSTags(ctx context.Context, awsTags string, awsVolumeID string, separator string) {
 
+	var tagAdded = false
 	awsRegion, awsVolume := splitVol(awsVolumeID)
 
 	/* Connect to AWS */
@@ -194,18 +227,24 @@ func addAWSTags(ctx context.Context, awsTags string, awsVolumeID string, separat
 	resp, err := svc.DescribeVolumes(params)
 	if err != nil {
 		logWithCtx(ctx).WithError(err).WithFields(log.Fields{"volId": awsVolume, "region": awsRegion}).Error("Cannot get volume")
+		processingErrors.Inc()
 		return
 	}
 	for i := range tags {
 		t := strings.Split(tags[i], "=")
 		if len(t) != 2 {
-			logWithCtx(ctx).Error("Skipping malform tag")
+			logWithCtx(ctx).Error("Skipping malformed tag")
+			processingErrors.Inc()
 			continue
 		}
 		logWithCtx(ctx).WithFields(log.Fields{"tagKey": t[0], "tagValue": t[1]}).Info("Adding tags to EBS volume")
 		if !hasTag(ctx, resp.Volumes[0].Tags, t[0], t[1]) {
+			tagAdded = true
 			setTag(ctx, svc, t[0], t[1], awsVolume)
 		}
+	}
+	if tagAdded {
+		volumesTagged.Inc()
 	}
 }
 
@@ -232,6 +271,7 @@ func setTag(ctx context.Context, svc *ec2.EC2, tagKey string, tagValue string, v
 	if *debug {
 		logWithCtx(ctx).Debugf("Returned value from CreatesTags call: %v", ret)
 	}
+	tagsExisting.Inc()
 	return true
 }
 
@@ -244,6 +284,7 @@ func hasTag(ctx context.Context, tags []*ec2.Tag, key string, value string) bool
 	for i := range tags {
 		if *tags[i].Key == key && *tags[i].Value == value {
 			logWithCtx(ctx).WithFields(log.Fields{"tagKey": key, "tagValue": value}).Info("Tag value already exists")
+			tagsExisting.Inc()
 			return true
 		}
 	}
